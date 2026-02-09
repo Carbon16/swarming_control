@@ -1,0 +1,443 @@
+import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+const express = require("express");
+const app = express();
+
+const port = Number(process.env.PORT ?? 3000);
+const ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg";
+const cameraDevice = process.env.CAMERA_DEVICE ?? "/dev/video0";
+const timelapseDir = process.env.TIMELAPSE_DIR ?? "/home/pi/timelapse";
+const cronSchedule = process.env.CRON_SCHEDULE ?? "*/5 * * * *";
+const captureCommandTemplate =
+	process.env.CAPTURE_COMMAND ??
+	"rpicam-still -o \"$RUN_DIR/$DATE.jpg\"";
+const cronMarker = "# timelapse-capture";
+const lowSpaceThresholdBytes = 7 * 1024 * 1024 * 1024;
+
+app.use(express.json());
+
+const ffmpegArgs = [
+	"-f",
+	"v4l2",
+	"-i",
+	cameraDevice,
+	"-vf",
+	"scale=640:-1",
+	"-r",
+	"15",
+	"-f",
+	"mjpeg",
+	"pipe:1",
+];
+
+app.get("/", (req, res) => {
+	res.type("html").send(`<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Raspberry Pi Camera Stream</title>
+		<style>
+			body { font-family: Arial, sans-serif; margin: 24px; background: #0f1115; color: #e6e6e6; }
+			.frame { max-width: 820px; margin: 0 auto; }
+			img { width: 100%; height: auto; border-radius: 8px; border: 1px solid #2d313a; }
+			.hint { opacity: 0.7; font-size: 14px; margin-top: 12px; }
+		</style>
+	</head>
+	<body>
+		<div class="frame">
+			<h1>Camera Stream</h1>
+			<img src="/stream.mjpg" alt="Live stream" />
+			<div style="margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+				<label for="runName">Run name:</label>
+				<input id="runName" placeholder="e.g. sunrise_day1" />
+			</div>
+			<div style="margin-top: 18px; display: flex; gap: 12px; flex-wrap: wrap;">
+				<button id="setup">Setup Timelapse (every 5 min)</button>
+				<button id="preview">Preview Timelapse</button>
+				<button id="finalize">Create Full Timelapse</button>
+			</div>
+			<div class="hint" id="status">Ready.</div>
+			<div style="margin-top: 12px; display: flex; gap: 12px; flex-wrap: wrap;">
+				<a id="previewLink" href="/timelapse/preview.mp4" target="_blank">Open preview</a>
+				<a id="finalLink" href="/timelapse/timelapse.mp4" target="_blank">Open full timelapse</a>
+			</div>
+			<div class="hint">If the image freezes, refresh this page.</div>
+		</div>
+		<script>
+			const statusEl = document.getElementById("status");
+			const runNameEl = document.getElementById("runName");
+			const setStatus = (text) => { statusEl.textContent = text; };
+			const getRunName = () => runNameEl.value.trim();
+
+			const updateLinks = (runName) => {
+				document.getElementById("previewLink").href = "/timelapse/" + runName + "/preview.mp4";
+				document.getElementById("finalLink").href = "/timelapse/" + runName + "/timelapse.mp4";
+			};
+
+			fetch("/status").then(async (res) => {
+				if (!res.ok) return;
+				const data = await res.json();
+				if (data.warning) {
+					setStatus(data.warning);
+				}
+			});
+
+			document.getElementById("setup").addEventListener("click", async () => {
+				const runName = getRunName();
+				if (!runName) {
+					setStatus("Please enter a run name first.");
+					return;
+				}
+				setStatus("Setting up timelapse...");
+				const res = await fetch("/setup", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ runName }),
+				});
+				if (res.ok) {
+					const data = await res.json();
+					updateLinks(runName);
+					setStatus(data.warning ? data.warning : "Timelapse cron installed.");
+				} else {
+					setStatus("Setup failed.");
+				}
+			});
+
+			document.getElementById("preview").addEventListener("click", async () => {
+				const runName = getRunName();
+				if (!runName) {
+					setStatus("Please enter a run name first.");
+					return;
+				}
+				setStatus("Creating preview timelapse...");
+				const res = await fetch("/preview", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ runName }),
+				});
+				if (res.ok) {
+					updateLinks(runName);
+					setStatus("Preview ready.");
+				} else {
+					setStatus("Preview failed.");
+				}
+			});
+
+			document.getElementById("finalize").addEventListener("click", async () => {
+				const runName = getRunName();
+				if (!runName) {
+					setStatus("Please enter a run name first.");
+					return;
+				}
+				setStatus("Creating full timelapse...");
+				const res = await fetch("/finalize", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ runName }),
+				});
+				if (res.ok) {
+					updateLinks(runName);
+					setStatus("Full timelapse ready. Cron stopped for this run.");
+					const shouldDelete = window.confirm("Delete captured JPGs for this run?");
+					if (shouldDelete) {
+						const cleanupRes = await fetch("/cleanup", {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({ runName }),
+						});
+						setStatus(cleanupRes.ok ? "JPGs deleted." : "Failed to delete JPGs.");
+					}
+				} else {
+					setStatus("Full timelapse failed.");
+				}
+			});
+		</script>
+	</body>
+</html>`);
+});
+
+app.use("/timelapse", express.static(timelapseDir));
+
+app.get("/stream.mjpg", (req, res) => {
+	res.writeHead(200, {
+		"Content-Type": "multipart/x-mixed-replace; boundary=frame",
+		"Cache-Control": "no-cache, no-store, must-revalidate",
+		Pragma: "no-cache",
+		Expires: "0",
+		Connection: "close",
+	});
+
+	const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+
+	let closed = false;
+
+	const cleanup = () => {
+		if (closed) return;
+		closed = true;
+		ffmpeg.kill("SIGINT");
+	};
+
+	req.on("close", cleanup);
+	res.on("close", cleanup);
+
+	ffmpeg.stdout.on("data", (chunk: Buffer) => {
+		if (closed) return;
+		res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${chunk.length}\r\n\r\n`);
+		res.write(chunk);
+		res.write("\r\n");
+	});
+
+	ffmpeg.stderr.on("data", (chunk: Buffer) => {
+		if (process.env.FFMPEG_LOG === "1") {
+			console.error(chunk.toString());
+		}
+	});
+
+	ffmpeg.on("close", () => {
+		cleanup();
+		if (!res.headersSent) {
+			res.status(500).end("FFmpeg exited");
+		}
+	});
+});
+
+const runCommand = (command: string, args: string[]) =>
+	new Promise<void>((resolve, reject) => {
+		const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+		child.on("error", reject);
+		child.on("close", (code) => {
+			if (code === 0) resolve();
+			else reject(new Error(`${command} exited with code ${code}`));
+		});
+	});
+
+const normalizeRunName = (value: string) =>
+	value
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9_-]+/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.substring(0, 60);
+
+const getRunPaths = (runName: string) => {
+	const runDir = path.join(timelapseDir, runName);
+	return {
+		runDir,
+		captureScriptPath: path.join(runDir, "capture.sh"),
+		previewPath: path.join(runDir, "preview.mp4"),
+		finalPath: path.join(runDir, "timelapse.mp4"),
+	};
+};
+
+const getFreeBytes = async (): Promise<number | null> => {
+	try {
+		const df = spawn("df", ["-k", timelapseDir], { stdio: ["ignore", "pipe", "pipe"] });
+		const output = await new Promise<string>((resolve, reject) => {
+			let data = "";
+			df.stdout.on("data", (chunk) => (data += chunk.toString()));
+			df.on("error", reject);
+			df.on("close", () => resolve(data));
+		});
+
+		const lines = output.trim().split("\n");
+		if (lines.length < 2) return null;
+		const parts = lines[1].split(/\s+/);
+		if (parts.length < 4) return null;
+		const availableKb = Number(parts[3]);
+		return Number.isFinite(availableKb) ? availableKb * 1024 : null;
+	} catch {
+		return null;
+	}
+};
+
+const installCron = async (runName: string) => {
+	const { runDir, captureScriptPath } = getRunPaths(runName);
+	await fs.mkdir(runDir, { recursive: true });
+
+	const command = captureCommandTemplate.replace(/\$RUN_DIR/g, runDir);
+	const script = `#!/bin/bash\nDATE=$(date +"%Y-%m-%d_%H%M")\n${command}\n`;
+	await fs.writeFile(captureScriptPath, script, { mode: 0o755 });
+
+	let existing = "";
+	try {
+		const crontabList = spawn("crontab", ["-l"], { stdio: ["ignore", "pipe", "pipe"] });
+		existing = await new Promise<string>((resolve) => {
+			let data = "";
+			crontabList.stdout.on("data", (chunk) => (data += chunk.toString()));
+			crontabList.on("close", () => resolve(data));
+		});
+	} catch {
+		existing = "";
+	}
+
+	const filtered = existing
+		.split("\n")
+		.filter((line) => line.trim() && !line.includes(`${cronMarker} ${runName}`));
+	filtered.push(`${cronSchedule} ${captureScriptPath} ${cronMarker} ${runName}`);
+	const newCrontab = `${filtered.join("\n")}\n`;
+
+	await new Promise<void>((resolve, reject) => {
+		const crontabSet = spawn("crontab", ["-"], { stdio: ["pipe", "pipe", "pipe"] });
+		crontabSet.stdin.write(newCrontab);
+		crontabSet.stdin.end();
+		crontabSet.on("error", reject);
+		crontabSet.on("close", (code) => {
+			if (code === 0) resolve();
+			else reject(new Error(`crontab exited with code ${code}`));
+		});
+	});
+};
+
+const removeCron = async (runName: string) => {
+	let existing = "";
+	try {
+		const crontabList = spawn("crontab", ["-l"], { stdio: ["ignore", "pipe", "pipe"] });
+		existing = await new Promise<string>((resolve) => {
+			let data = "";
+			crontabList.stdout.on("data", (chunk) => (data += chunk.toString()));
+			crontabList.on("close", () => resolve(data));
+		});
+	} catch {
+		existing = "";
+	}
+
+	const filtered = existing
+		.split("\n")
+		.filter((line) => line.trim() && !line.includes(`${cronMarker} ${runName}`));
+	const newCrontab = `${filtered.join("\n")}\n`;
+
+	await new Promise<void>((resolve, reject) => {
+		const crontabSet = spawn("crontab", ["-"], { stdio: ["pipe", "pipe", "pipe"] });
+		crontabSet.stdin.write(newCrontab);
+		crontabSet.stdin.end();
+		crontabSet.on("error", reject);
+		crontabSet.on("close", (code) => {
+			if (code === 0) resolve();
+			else reject(new Error(`crontab exited with code ${code}`));
+		});
+	});
+};
+
+const deleteJpgs = async (runDir: string) => {
+	let entries: string[] = [];
+	try {
+		entries = await fs.readdir(runDir);
+	} catch {
+		return;
+	}
+
+	const deletes = entries
+		.filter((entry) => entry.toLowerCase().endsWith(".jpg"))
+		.map((entry) => fs.unlink(path.join(runDir, entry)).catch(() => undefined));
+
+	await Promise.all(deletes);
+};
+
+const buildTimelapse = async (runDir: string, outputPath: string, width: number) => {
+	await fs.mkdir(runDir, { recursive: true });
+	const scale = `scale=${width}:-2`;
+	const args = [
+		"-y",
+		"-pattern_type",
+		"glob",
+		"-framerate",
+		"24",
+		"-i",
+		path.join(runDir, "*.jpg"),
+		"-vf",
+		scale,
+		"-pix_fmt",
+		"yuv420p",
+		outputPath,
+	];
+
+	await runCommand(ffmpegPath, args);
+};
+
+app.get("/status", async (_req, res) => {
+	const freeBytes = await getFreeBytes();
+	const warning =
+		freeBytes !== null && freeBytes < lowSpaceThresholdBytes
+			? `Warning: low disk space (${(freeBytes / 1024 / 1024 / 1024).toFixed(1)} GB free).`
+			: null;
+	res.status(200).json({ ok: true, freeBytes, warning });
+});
+
+app.post("/setup", async (req, res) => {
+	try {
+		const runName = normalizeRunName(req.body?.runName ?? "");
+		if (!runName) {
+			res.status(400).json({ ok: false, error: "Run name is required" });
+			return;
+		}
+		await installCron(runName);
+		const freeBytes = await getFreeBytes();
+		const warning =
+			freeBytes !== null && freeBytes < lowSpaceThresholdBytes
+				? `Warning: low disk space (${(freeBytes / 1024 / 1024 / 1024).toFixed(1)} GB free).`
+				: null;
+		res.status(200).json({ ok: true, runName, warning });
+	} catch (error) {
+		console.error(error);
+		res.status(500).json({ ok: false, error: "Failed to install cron" });
+	}
+});
+
+app.post("/preview", async (req, res) => {
+	try {
+		const runName = normalizeRunName(req.body?.runName ?? "");
+		if (!runName) {
+			res.status(400).json({ ok: false, error: "Run name is required" });
+			return;
+		}
+		const { runDir, previewPath } = getRunPaths(runName);
+		await buildTimelapse(runDir, previewPath, 640);
+		res.status(200).json({ ok: true, path: `/timelapse/${runName}/preview.mp4` });
+	} catch (error) {
+		console.error(error);
+		res.status(500).json({ ok: false, error: "Failed to build preview" });
+	}
+});
+
+app.post("/finalize", async (req, res) => {
+	try {
+		const runName = normalizeRunName(req.body?.runName ?? "");
+		if (!runName) {
+			res.status(400).json({ ok: false, error: "Run name is required" });
+			return;
+		}
+		const { runDir, finalPath } = getRunPaths(runName);
+		await buildTimelapse(runDir, finalPath, 1920);
+		await removeCron(runName);
+		res.status(200).json({ ok: true, path: `/timelapse/${runName}/timelapse.mp4` });
+	} catch (error) {
+		console.error(error);
+		res.status(500).json({ ok: false, error: "Failed to build timelapse" });
+	}
+});
+
+app.post("/cleanup", async (req, res) => {
+	try {
+		const runName = normalizeRunName(req.body?.runName ?? "");
+		if (!runName) {
+			res.status(400).json({ ok: false, error: "Run name is required" });
+			return;
+		}
+		const { runDir } = getRunPaths(runName);
+		await deleteJpgs(runDir);
+		res.status(200).json({ ok: true });
+	} catch (error) {
+		console.error(error);
+		res.status(500).json({ ok: false, error: "Failed to delete JPGs" });
+	}
+});
+
+app.listen(port, () => {
+	console.log(`Streaming server listening on http://localhost:${port}`);
+	console.log(`Camera device: ${cameraDevice}`);
+});
