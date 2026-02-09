@@ -8,16 +8,61 @@ Express + FFmpeg MJPEG streaming server for a Raspberry Pi camera, with timelaps
 - FFmpeg installed (`sudo apt-get install ffmpeg`)
 - Bun or Node to run the server
 
-## Install
+## From executable
+You can also run the server without installing Bun or Node by downloading the latest release from the [Releases](https://github.com/carbon16/swarming_control/releases).
+
+```bash
+chmod +x swarming_control
+FFMPEG_PATH=ffmpeg CAMERA_DEVICE=/dev/video0 PORT=3000 ./swarming_control
+```
+### Architectures
+- `swarming_control-arm64`: For Raspberry Pi 4 and later (ARMv8)
+
+You can check your Pi's architecture with `uname -m`:
+- `aarch64` = ARMv8 (use `swarming_control-arm64`)
+- `armv7l` = ARMv7 (32-bit). Bun compile targets do not currently support armv7.
+
+
+## With bun
+### Install
 
 ```bash
 bun install
 ```
 
-## Run
+### Run
 
 ```bash
 FFMPEG_PATH=ffmpeg CAMERA_DEVICE=/dev/video0 PORT=3000 bun run index.ts
+```
+
+### Build for Raspberry Pi (binary)
+
+Build on any machine and copy the binary to the Pi:
+
+```bash
+bun run build:pi:arm64
+```
+
+Outputs:
+
+- `dist/swarming_control-arm64`
+
+For ARMv7 (32-bit) Pis, run with Bun/Node on-device instead of using a compiled binary.
+
+## Optional hotspot setup
+
+If you want the Pi to start a Wi-Fi hotspot before launching the server, pass `--hotspot`:
+
+```bash
+FFMPEG_PATH=ffmpeg CAMERA_DEVICE=/dev/video0 PORT=3000 bun run index.ts --hotspot
+```
+
+This runs:
+
+```bash
+sudo nmcli con add type wifi ifname wlan0 con-name Hotspot autoconnect yes ssid PiGallery mode ap ipv4.method shared
+sudo nmcli con up Hotspot
 ```
 
 Open `http://<pi-ip>:3000` in your browser.

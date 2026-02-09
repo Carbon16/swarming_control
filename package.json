@@ -1,8 +1,12 @@
 {
   "name": "swarming_control",
+  "version": "0.1.0",
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "build:pi:arm64": "bun build index.ts --compile --target=bun-linux-arm64 --outfile dist/swarming_control-arm64"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

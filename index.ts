@@ -14,6 +14,7 @@ const captureCommandTemplate =
 	"rpicam-still -o \"$RUN_DIR/$DATE.jpg\"";
 const cronMarker = "# timelapse-capture";
 const lowSpaceThresholdBytes = 7 * 1024 * 1024 * 1024;
+const shouldEnableHotspot = process.argv.includes("--hotspot");
 
 app.use(express.json());
 
@@ -214,6 +215,30 @@ const runCommand = (command: string, args: string[]) =>
 			else reject(new Error(`${command} exited with code ${code}`));
 		});
 	});
+
+const setupHotspot = async () => {
+	await runCommand("sudo", [
+		"nmcli",
+		"con",
+		"add",
+		"type",
+		"wifi",
+		"ifname",
+		"wlan0",
+		"con-name",
+		"Hotspot",
+		"autoconnect",
+		"yes",
+		"ssid",
+		"PiGallery",
+		"mode",
+		"ap",
+		"ipv4.method",
+		"shared",
+	]);
+
+	await runCommand("sudo", ["nmcli", "con", "up", "Hotspot"]);
+};
 
 const normalizeRunName = (value: string) =>
 	value
@@ -437,7 +462,20 @@ app.post("/cleanup", async (req, res) => {
 	}
 });
 
-app.listen(port, () => {
-	console.log(`Streaming server listening on http://localhost:${port}`);
-	console.log(`Camera device: ${cameraDevice}`);
+const startServer = async () => {
+	if (shouldEnableHotspot) {
+		console.log("Enabling hotspot..." );
+		await setupHotspot();
+		console.log("Hotspot enabled (SSID: PiGallery).");
+	}
+
+	app.listen(port, () => {
+		console.log(`Streaming server listening on http://localhost:${port}`);
+		console.log(`Camera device: ${cameraDevice}`);
+	});
+};
+
+startServer().catch((error) => {
+	console.error("Failed to start server:", error);
+	process.exitCode = 1;
 });
