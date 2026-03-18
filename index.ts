@@ -62,8 +62,8 @@ app.get("/", (req: Request, res: Response) => {
 			</div>
 			<div class="hint" id="status">Ready.</div>
 			<div style="margin-top: 12px; display: flex; gap: 12px; flex-wrap: wrap;">
-				<a id="previewLink" href="/timelapse/preview.mp4" target="_blank">Open preview</a>
-				<a id="finalLink" href="/timelapse/timelapse.mp4" target="_blank">Open full timelapse</a>
+				<a id="previewLink" href="#" target="_blank">Open preview</a>
+				<a id="finalLink" href="#" target="_blank">Open full timelapse</a>
 			</div>
 			<div class="hint">If the image freezes, refresh this page.</div>
 		</div>
@@ -77,6 +77,18 @@ app.get("/", (req: Request, res: Response) => {
 				document.getElementById("previewLink").href = "/timelapse/" + runName + "/preview.mp4";
 				document.getElementById("finalLink").href = "/timelapse/" + runName + "/timelapse.mp4";
 			};
+
+			const preventBrokenLink = (id) => {
+				document.getElementById(id).addEventListener("click", (event) => {
+					if (!getRunName()) {
+						event.preventDefault();
+						setStatus("Enter a run name, then click Preview or Create Full Timelapse first.");
+					}
+				});
+			};
+
+			preventBrokenLink("previewLink");
+			preventBrokenLink("finalLink");
 
 			fetch("/status").then(async (res) => {
 				if (!res.ok) return;
@@ -161,6 +173,28 @@ app.get("/", (req: Request, res: Response) => {
 });
 
 app.use("/timelapse", express.static(timelapseDir));
+
+app.get("/timelapse/preview.mp4", (req: Request, res: Response) => {
+	const runName = normalizeRunName(String(req.query.runName ?? ""));
+	if (!runName) {
+		res
+			.status(400)
+			.send("Preview is run-specific. Use /timelapse/<runName>/preview.mp4 or add ?runName=<runName>.");
+		return;
+	}
+	res.redirect(`/timelapse/${runName}/preview.mp4`);
+});
+
+app.get("/timelapse/timelapse.mp4", (req: Request, res: Response) => {
+	const runName = normalizeRunName(String(req.query.runName ?? ""));
+	if (!runName) {
+		res
+			.status(400)
+			.send("Timelapse is run-specific. Use /timelapse/<runName>/timelapse.mp4 or add ?runName=<runName>.");
+		return;
+	}
+	res.redirect(`/timelapse/${runName}/timelapse.mp4`);
+});
 
 app.get("/stream.mjpg", (req: Request, res: Response) => {
 	res.writeHead(200, {
