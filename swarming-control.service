@@ -1,0 +1,23 @@
+[Unit]
+Description=Swarming Control Camera Stream
+After=network.target
+
+[Service]
+Type=simple
+User=lgs1g24
+WorkingDirectory=/home/lgs1g24/swarming_control
+Environment="NODE_ENV=production"
+Environment="PORT=3000"
+Environment="FFMPEG_PATH=ffmpeg"
+Environment="CAMERA_DEVICE=/dev/video0"
+Environment="STREAM_MODE=rpicam"
+# Optional: set a custom timelapse directory if needed
+# Environment="TIMELAPSE_DIR=/home/lgs1g24/timelapse"
+ExecStart=/usr/bin/node /home/lgs1g24/swarming_control/dist/index.js
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
