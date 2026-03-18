@@ -101,11 +101,18 @@ Open `http://<pi-ip>:3000` in your browser.
 
 - `FFMPEG_PATH`: Path to the ffmpeg binary (default: `ffmpeg`)
 - `CAMERA_DEVICE`: V4L2 device (default: `/dev/video0`)
+- `STREAM_MODE`: `v4l2` (default, USB cameras) or `rpicam` (CSI cameras via `rpicam-vid`)
 - `PORT`: HTTP port (default: `3000`)
 - `TIMELAPSE_DIR`: Where timelapse images and videos are stored (default: `/home/pi/timelapse`)
 - `CRON_SCHEDULE`: Cron schedule for captures (default: `*/5 * * * *`)
 - `CAPTURE_COMMAND`: Custom capture command (default uses `rpicam-still`)
 - `FFMPEG_LOG`: Set to `1` to print ffmpeg stderr output
+
+For CSI cameras (like IMX708) where `rpicam-still` works but live stream is blank, start with:
+
+```bash
+STREAM_MODE=rpicam PORT=3000 node dist/index.js
+```
 
 ## Timelapse workflow
 

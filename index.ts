@@ -8,6 +8,7 @@ const app = express();
 const port = Number(process.env.PORT ?? 3000);
 const ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg";
 const cameraDevice = process.env.CAMERA_DEVICE ?? "/dev/video0";
+const streamMode = (process.env.STREAM_MODE ?? "v4l2").toLowerCase();
 const timelapseDir = process.env.TIMELAPSE_DIR ?? "/home/pi/timelapse";
 const cronSchedule = process.env.CRON_SCHEDULE ?? "*/5 * * * *";
 const captureCommandTemplate =
@@ -32,6 +33,36 @@ const ffmpegArgs = [
 	"mjpeg",
 	"pipe:1",
 ];
+
+const rpicamVidArgs = [
+	"--codec",
+	"mjpeg",
+	"--nopreview",
+	"--width",
+	"1280",
+	"--height",
+	"720",
+	"--framerate",
+	"15",
+	"-t",
+	"0",
+	"-o",
+	"-",
+];
+
+const findJpegStart = (buffer: Buffer, startAt = 0) => {
+	for (let i = startAt; i < buffer.length - 1; i += 1) {
+		if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) return i;
+	}
+	return -1;
+};
+
+const findJpegEnd = (buffer: Buffer, startAt = 0) => {
+	for (let i = startAt; i < buffer.length - 1; i += 1) {
+		if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) return i + 1;
+	}
+	return -1;
+};
 
 app.get("/", (req: Request, res: Response) => {
 	res.type("html").send(`<!doctype html>
@@ -251,38 +282,72 @@ app.get("/stream.mjpg", (req: Request, res: Response) => {
 		Connection: "close",
 	});
 
-	const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+	const streamCommand = streamMode === "rpicam" ? "rpicam-vid" : ffmpegPath;
+	const streamArgs = streamMode === "rpicam" ? rpicamVidArgs : ffmpegArgs;
+
+	const streamer = spawn(streamCommand, streamArgs, {
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 
 	let closed = false;
+	let sawFrame = false;
+	let jpegBuffer = Buffer.alloc(0);
+	let stderr = "";
 
 	const cleanup = () => {
 		if (closed) return;
 		closed = true;
-		ffmpeg.kill("SIGINT");
+		streamer.kill("SIGINT");
 	};
 
 	req.on("close", cleanup);
 	res.on("close", cleanup);
 
-	ffmpeg.stdout.on("data", (chunk: Buffer) => {
+	streamer.stdout.on("data", (chunk: Buffer) => {
 		if (closed) return;
-		res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${chunk.length}\r\n\r\n`);
-		res.write(chunk);
-		res.write("\r\n");
+		jpegBuffer = Buffer.concat([jpegBuffer, chunk]);
+
+		while (!closed) {
+			const start = findJpegStart(jpegBuffer);
+			if (start < 0) {
+				if (jpegBuffer.length > 1024 * 1024) {
+					jpegBuffer = jpegBuffer.subarray(jpegBuffer.length - 1024 * 1024);
+				}
+				break;
+			}
+
+			const end = findJpegEnd(jpegBuffer, start + 2);
+			if (end < 0) {
+				if (start > 0) jpegBuffer = jpegBuffer.subarray(start);
+				break;
+			}
+
+			const frame = jpegBuffer.subarray(start, end + 1);
+			jpegBuffer = jpegBuffer.subarray(end + 1);
+			sawFrame = true;
+
+			res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`);
+			res.write(frame);
+			res.write("\r\n");
+		}
 	});
 
-	ffmpeg.stderr.on("data", (chunk: Buffer) => {
+	streamer.stderr.on("data", (chunk: Buffer) => {
+		stderr += chunk.toString();
 		if (process.env.FFMPEG_LOG === "1") {
 			console.error(chunk.toString());
 		}
 	});
 
-	ffmpeg.on("close", () => {
+	streamer.on("close", (code) => {
 		cleanup();
 		if (!res.headersSent) {
-			res.status(500).end("FFmpeg exited");
+			const details = stderr.trim();
+			if (!sawFrame && details) {
+				res.status(500).end(`Stream failed: ${details}`);
+				return;
+			}
+			res.status(500).end(`Stream process exited${code !== null ? ` (${code})` : ""}`);
 		}
 	});
 });
@@ -566,19 +631,21 @@ app.get("/status", async (_req: Request, res: Response): Promise<void> => {
 
 app.get("/health", async (_req: Request, res: Response): Promise<void> => {
 	try {
-		const ffmpeg = spawn(ffmpegPath, ["-version"], {
+		const command = streamMode === "rpicam" ? "rpicam-vid" : ffmpegPath;
+		const args = streamMode === "rpicam" ? ["--version"] : ["-version"];
+		const proc = spawn(command, args, {
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		await new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => reject(new Error("FFmpeg check timeout")), 5000);
-			ffmpeg.on("close", (code) => {
+			proc.on("close", (code) => {
 				clearTimeout(timeout);
 				if (code === 0) resolve();
-				else reject(new Error(`FFmpeg returned code ${code}`));
+				else reject(new Error(`${command} returned code ${code}`));
 			});
-			ffmpeg.on("error", reject);
+			proc.on("error", reject);
 		});
-		res.status(200).json({ ok: true, status: "healthy" });
+		res.status(200).json({ ok: true, status: "healthy", streamMode, cameraDevice });
 	} catch (error) {
 		res.status(503).json({ ok: false, status: "unhealthy", error: String(error) });
 	}
