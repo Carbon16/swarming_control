@@ -244,10 +244,17 @@ app.get("/stream.mjpg", (req: Request, res: Response) => {
 const runCommand = (command: string, args: string[]) =>
 	new Promise<void>((resolve, reject) => {
 		const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+		let stderr = "";
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk.toString();
+		});
 		child.on("error", reject);
 		child.on("close", (code) => {
 			if (code === 0) resolve();
-			else reject(new Error(`${command} exited with code ${code}`));
+			else {
+				const details = stderr.trim();
+				reject(new Error(`${command} exited with code ${code}${details ? `: ${details}` : ""}`));
+			}
 		});
 	});
 
@@ -437,7 +444,18 @@ const deleteJpgs = async (runDir: string) => {
 const buildTimelapse = async (runDir: string, outputPath: string, width: number) => {
 	await fs.mkdir(runDir, { recursive: true });
 	const scale = `scale=${width}:-2`;
-	const args = [
+
+	const entries = await fs.readdir(runDir);
+	const jpgFiles = entries
+		.filter((entry) => entry.toLowerCase().endsWith(".jpg"))
+		.sort()
+		.map((entry) => path.join(runDir, entry));
+
+	if (jpgFiles.length === 0) {
+		throw new Error(`No JPG frames found in ${runDir}`);
+	}
+
+	const globArgs = [
 		"-y",
 		"-pattern_type",
 		"glob",
@@ -452,7 +470,43 @@ const buildTimelapse = async (runDir: string, outputPath: string, width: number)
 		outputPath,
 	];
 
-	await runCommand(ffmpegPath, args);
+	try {
+		await runCommand(ffmpegPath, globArgs);
+		return;
+	} catch (error) {
+		if (process.env.FFMPEG_LOG === "1") {
+			console.error("FFmpeg glob mode failed, retrying with concat mode:", error);
+		}
+	}
+
+	const concatListPath = path.join(runDir, "frames.txt");
+	const listBody = jpgFiles
+		.map((filePath) => `file '${filePath.replace(/'/g, "'\\''")}'`)
+		.join("\n");
+	await fs.writeFile(concatListPath, `${listBody}\n`);
+
+	const concatArgs = [
+		"-y",
+		"-f",
+		"concat",
+		"-safe",
+		"0",
+		"-i",
+		concatListPath,
+		"-vf",
+		scale,
+		"-r",
+		"24",
+		"-pix_fmt",
+		"yuv420p",
+		outputPath,
+	];
+
+	try {
+		await runCommand(ffmpegPath, concatArgs);
+	} finally {
+		await fs.unlink(concatListPath).catch(() => undefined);
+	}
 };
 
 app.get("/status", async (_req: Request, res: Response): Promise<void> => {
