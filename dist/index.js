@@ -7,7 +7,10 @@ const port = Number(process.env.PORT ?? 3000);
 const ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg";
 const cameraDevice = process.env.CAMERA_DEVICE ?? "/dev/video0";
 const streamMode = (process.env.STREAM_MODE ?? "v4l2").toLowerCase();
-const timelapseDir = process.env.TIMELAPSE_DIR ?? "/home/pi/timelapse";
+const defaultTimelapseDir = process.env.HOME
+    ? path.join(process.env.HOME, "timelapse")
+    : "/tmp/timelapse";
+const timelapseDir = process.env.TIMELAPSE_DIR ?? defaultTimelapseDir;
 const cronSchedule = process.env.CRON_SCHEDULE ?? "*/5 * * * *";
 const captureCommandTemplate = process.env.CAPTURE_COMMAND ??
     "rpicam-still -o \"$RUN_DIR/$DATE.jpg\"";
@@ -65,27 +68,121 @@ app.get("/", (req, res) => {
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Raspberry Pi Camera Stream</title>
 		<style>
-			body { font-family: Arial, sans-serif; margin: 24px; background: #0f1115; color: #e6e6e6; }
-			.frame { max-width: 820px; margin: 0 auto; }
-			img { width: 100%; height: auto; border-radius: 8px; border: 1px solid #2d313a; }
-			.hint { opacity: 0.7; font-size: 14px; margin-top: 12px; }
+			:root {
+				--bg-1: #0b1217;
+				--bg-2: #152630;
+				--panel: rgba(18, 32, 40, 0.88);
+				--panel-border: #2c4857;
+				--text: #e8f1f4;
+				--muted: #a9bbc4;
+				--accent: #52b788;
+				--accent-2: #2d6a4f;
+			}
+
+			* { box-sizing: border-box; }
+			body {
+				font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+				margin: 0;
+				padding: 24px;
+				color: var(--text);
+				background:
+					radial-gradient(1100px 500px at -10% -20%, #24485a 0%, transparent 55%),
+					radial-gradient(900px 420px at 120% -10%, #1f3a48 0%, transparent 58%),
+					linear-gradient(165deg, var(--bg-1), var(--bg-2));
+			}
+			.frame {
+				max-width: 900px;
+				margin: 0 auto;
+				padding: 18px 18px 16px;
+				border: 1px solid var(--panel-border);
+				border-radius: 14px;
+				background: var(--panel);
+				box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+			}
+			h1 {
+				margin: 0 0 14px;
+				font-size: 1.6rem;
+				font-weight: 700;
+				letter-spacing: 0.3px;
+			}
+			img {
+				width: 100%;
+				height: auto;
+				border-radius: 10px;
+				border: 1px solid #385665;
+				background: #071015;
+			}
+			.row {
+				margin-top: 14px;
+				display: flex;
+				gap: 10px;
+				flex-wrap: wrap;
+				align-items: center;
+			}
+			label {
+				font-size: 14px;
+				color: var(--muted);
+			}
+			input {
+				background: #0f1f27;
+				color: var(--text);
+				border: 1px solid #365464;
+				border-radius: 8px;
+				padding: 9px 10px;
+				min-width: 220px;
+			}
+			button {
+				background: linear-gradient(180deg, var(--accent), var(--accent-2));
+				color: #f5fff8;
+				border: 0;
+				border-radius: 8px;
+				padding: 10px 13px;
+				font-weight: 600;
+				cursor: pointer;
+			}
+			button:hover { filter: brightness(1.06); }
+			button:active { transform: translateY(1px); }
+			a {
+				color: #92ffd0;
+				text-underline-offset: 2px;
+			}
+			a:hover { color: #b4ffe1; }
+			.hint {
+				opacity: 0.95;
+				font-size: 14px;
+				margin-top: 12px;
+				color: var(--muted);
+			}
+			#status {
+				padding: 8px 10px;
+				border-radius: 8px;
+				border: 1px solid #355566;
+				background: rgba(9, 20, 26, 0.7);
+				color: #d6e4ea;
+			}
+			@media (max-width: 640px) {
+				body { padding: 14px; }
+				.frame { padding: 14px; }
+				input { min-width: 100%; width: 100%; }
+				button { width: 100%; }
+			}
 		</style>
 	</head>
 	<body>
 		<div class="frame">
 			<h1>Camera Stream</h1>
 			<img src="/stream.mjpg" alt="Live stream" />
-			<div style="margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+			<div class="row">
 				<label for="runName">Run name:</label>
 				<input id="runName" placeholder="e.g. sunrise_day1" />
 			</div>
-			<div style="margin-top: 18px; display: flex; gap: 12px; flex-wrap: wrap;">
+			<div class="row" style="margin-top: 18px;">
 				<button id="setup">Setup Timelapse (every 5 min)</button>
 				<button id="preview">Preview Timelapse</button>
 				<button id="finalize">Create Full Timelapse</button>
 			</div>
 			<div class="hint" id="status">Ready.</div>
-			<div style="margin-top: 12px; display: flex; gap: 12px; flex-wrap: wrap;">
+			<div class="row" style="margin-top: 12px;">
 				<a id="previewLink" href="#" target="_blank">Open preview</a>
 				<a id="finalLink" href="#" target="_blank">Open full timelapse</a>
 			</div>
@@ -715,6 +812,8 @@ const startServer = async () => {
     const server = app.listen(port, () => {
         console.log(`Streaming server listening on http://localhost:${port}`);
         console.log(`Camera device: ${cameraDevice}`);
+        console.log(`Timelapse directory: ${timelapseDir}`);
+        console.log(`Stream mode: ${streamMode}`);
     });
     const gracefulShutdown = (signal) => {
         console.log(`Received ${signal}, shutting down gracefully...`);
