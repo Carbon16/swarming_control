@@ -505,9 +505,16 @@ const runCommand = (command: string, args: string[]) =>
 
 const setupHotspot = async () => {
 	try {
-		await Promise.race([
-			Promise.all([
-				runCommand("sudo", [
+		const setup = async () => {
+			let hotspotExists = true;
+			try {
+				await runCommand("sudo", ["nmcli", "-t", "-f", "NAME", "con", "show", "Hotspot"]);
+			} catch {
+				hotspotExists = false;
+			}
+
+			if (!hotspotExists) {
+				await runCommand("sudo", [
 					"nmcli",
 					"con",
 					"add",
@@ -525,9 +532,14 @@ const setupHotspot = async () => {
 					"ap",
 					"ipv4.method",
 					"shared",
-				]),
-				runCommand("sudo", ["nmcli", "con", "up", "Hotspot"]),
-			]),
+				]);
+			}
+
+			await runCommand("sudo", ["nmcli", "con", "up", "Hotspot"]);
+		};
+
+		await Promise.race([
+			setup(),
 			new Promise<never>((_, reject) =>
 				setTimeout(() => reject(new Error("Hotspot setup timeout (3 min)")), 180000)
 			),
