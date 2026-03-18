@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import express, { Request, Response } from "express";
@@ -65,6 +65,39 @@ const findJpegEnd = (buffer: Buffer, startAt = 0) => {
 		if (buffer[i] === 0xff && buffer[i + 1] === 0xd9) return i + 1;
 	}
 	return -1;
+};
+
+const activeStreamers = new Set<ChildProcess>();
+
+const stopActiveStreams = async () => {
+	if (activeStreamers.size === 0) return;
+
+	const waiters = Array.from(activeStreamers).map(
+		(streamer) =>
+			new Promise<void>((resolve) => {
+				if (streamer.exitCode !== null) {
+					activeStreamers.delete(streamer);
+					resolve();
+					return;
+				}
+
+				const onClose = () => {
+					activeStreamers.delete(streamer);
+					resolve();
+				};
+
+				streamer.once("close", onClose);
+				streamer.kill("SIGINT");
+				setTimeout(() => {
+					if (streamer.exitCode === null) streamer.kill("SIGKILL");
+				}, 1500);
+			})
+	);
+
+	await Promise.race([
+		Promise.all(waiters),
+		new Promise<void>((resolve) => setTimeout(resolve, 2500)),
+	]);
 };
 
 app.get("/", (req: Request, res: Response) => {
@@ -178,7 +211,7 @@ app.get("/", (req: Request, res: Response) => {
 	<body>
 		<div class="frame">
 			<h1>Camera Stream</h1>
-			<img src="/stream.mjpg" alt="Live stream" />
+			<img id="liveStream" src="/stream.mjpg" alt="Live stream" />
 			<div class="row">
 				<label for="runName">Run name:</label>
 				<input id="runName" placeholder="e.g. sunrise_day1" />
@@ -275,6 +308,8 @@ app.get("/", (req: Request, res: Response) => {
 					setStatus("Please enter a run name first.");
 					return;
 				}
+				// Release the camera immediately from the live stream request.
+				document.getElementById("liveStream").src = "";
 				setStatus("Setting up timelapse...");
 				const res = await fetch("/setup", {
 					method: "POST",
@@ -385,6 +420,7 @@ app.get("/stream.mjpg", (req: Request, res: Response) => {
 	const streamer = spawn(streamCommand, streamArgs, {
 		stdio: ["ignore", "pipe", "pipe"],
 	});
+	activeStreamers.add(streamer);
 
 	let closed = false;
 	let sawFrame = false;
@@ -394,6 +430,7 @@ app.get("/stream.mjpg", (req: Request, res: Response) => {
 	const cleanup = () => {
 		if (closed) return;
 		closed = true;
+		activeStreamers.delete(streamer);
 		streamer.kill("SIGINT");
 	};
 
@@ -755,17 +792,37 @@ app.post("/setup", async (req: Request, res: Response): Promise<void> => {
 			res.status(400).json({ ok: false, error: "Run name is required" });
 			return;
 		}
+
+		await stopActiveStreams();
 		await installCron(runName);
 
 		const { captureScriptPath } = getRunPaths(runName);
 		let captureWarning: string | null = null;
-		try {
-			// Capture one frame immediately so a brand-new run has content for preview.
-			await runCommand("bash", [captureScriptPath]);
-		} catch (error) {
-			const raw = error instanceof Error ? error.message : String(error);
-			const short = raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
-			captureWarning = `Cron installed, but immediate capture failed: ${short}`;
+		const shouldTryImmediateCapture =
+			process.env.IMMEDIATE_CAPTURE === "1" || streamMode !== "rpicam";
+
+		if (shouldTryImmediateCapture) {
+			try {
+				// Capture one frame immediately so a brand-new run has content for preview.
+				await runCommand("bash", [captureScriptPath]);
+			} catch (error) {
+				const raw = error instanceof Error ? error.message : String(error);
+				const lower = raw.toLowerCase();
+				if (
+					lower.includes("resource busy") ||
+					lower.includes("device busy") ||
+					lower.includes("v4l2")
+				) {
+					captureWarning =
+						"Cron installed. Immediate capture skipped because camera is busy (likely live stream in use).";
+				} else {
+					const short = raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
+					captureWarning = `Cron installed, but immediate capture failed: ${short}`;
+				}
+			}
+		} else {
+			captureWarning =
+				"Cron installed. First frame will be captured by schedule (immediate capture is disabled in rpicam mode).";
 		}
 
 		const freeBytes = await getFreeBytes();
