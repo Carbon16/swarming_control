@@ -9,7 +9,10 @@ const port = Number(process.env.PORT ?? 3000);
 const ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg";
 const cameraDevice = process.env.CAMERA_DEVICE ?? "/dev/video0";
 const streamMode = (process.env.STREAM_MODE ?? "v4l2").toLowerCase();
-const timelapseDir = process.env.TIMELAPSE_DIR ?? "/home/pi/timelapse";
+const defaultTimelapseDir = process.env.HOME
+	? path.join(process.env.HOME, "timelapse")
+	: "/tmp/timelapse";
+const timelapseDir = process.env.TIMELAPSE_DIR ?? defaultTimelapseDir;
 const cronSchedule = process.env.CRON_SCHEDULE ?? "*/5 * * * *";
 const captureCommandTemplate =
 	process.env.CAPTURE_COMMAND ??
@@ -750,6 +753,8 @@ const startServer = async () => {
 	const server = app.listen(port, () => {
 		console.log(`Streaming server listening on http://localhost:${port}`);
 		console.log(`Camera device: ${cameraDevice}`);
+		console.log(`Timelapse directory: ${timelapseDir}`);
+		console.log(`Stream mode: ${streamMode}`);
 	});
 
 	const gracefulShutdown = (signal: string) => {
