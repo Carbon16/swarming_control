@@ -72,23 +72,66 @@ app.get("/", (req: Request, res: Response) => {
 			const runNameEl = document.getElementById("runName");
 			const setStatus = (text) => { statusEl.textContent = text; };
 			const getRunName = () => runNameEl.value.trim();
+			const normalizeRunName = (value) => value
+				.trim()
+				.toLowerCase()
+				.replace(/[^a-z0-9_-]+/g, "-")
+				.replace(/-+/g, "-")
+				.replace(/^-+|-+$/g, "")
+				.substring(0, 60);
 
 			const updateLinks = (runName) => {
 				document.getElementById("previewLink").href = "/timelapse/" + runName + "/preview.mp4";
 				document.getElementById("finalLink").href = "/timelapse/" + runName + "/timelapse.mp4";
 			};
 
-			const preventBrokenLink = (id) => {
-				document.getElementById(id).addEventListener("click", (event) => {
-					if (!getRunName()) {
-						event.preventDefault();
-						setStatus("Enter a run name, then click Preview or Create Full Timelapse first.");
-					}
-				});
-			};
+			runNameEl.addEventListener("input", () => {
+				const runName = normalizeRunName(getRunName());
+				if (!runName) {
+					document.getElementById("previewLink").href = "#";
+					document.getElementById("finalLink").href = "#";
+					return;
+				}
+				updateLinks(runName);
+			});
 
-			preventBrokenLink("previewLink");
-			preventBrokenLink("finalLink");
+			document.getElementById("previewLink").addEventListener("click", async (event) => {
+				event.preventDefault();
+				const rawRunName = getRunName();
+				if (!rawRunName) {
+					setStatus("Enter a run name first.");
+					return;
+				}
+
+				setStatus("Creating preview timelapse...");
+				const res = await fetch("/preview", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ runName: rawRunName }),
+				});
+
+				if (!res.ok) {
+					const data = await res.json().catch(() => ({}));
+					setStatus(data.error ? "Preview failed: " + data.error : "Preview failed.");
+					return;
+				}
+
+				const data = await res.json();
+				const runName = normalizeRunName(rawRunName);
+				updateLinks(runName);
+				setStatus("Preview ready.");
+				window.open(data.path || ("/timelapse/" + runName + "/preview.mp4"), "_blank", "noopener");
+			});
+
+			document.getElementById("finalLink").addEventListener("click", (event) => {
+				const runName = normalizeRunName(getRunName());
+				if (!runName) {
+					event.preventDefault();
+					setStatus("Enter a run name first.");
+					return;
+				}
+				updateLinks(runName);
+			});
 
 			fetch("/status").then(async (res) => {
 				if (!res.ok) return;
@@ -115,7 +158,8 @@ app.get("/", (req: Request, res: Response) => {
 					updateLinks(runName);
 					setStatus(data.warning ? data.warning : "Timelapse cron installed.");
 				} else {
-					setStatus("Setup failed.");
+					const data = await res.json().catch(() => ({}));
+					setStatus(data.error ? "Setup failed: " + data.error : "Setup failed.");
 				}
 			});
 
@@ -135,7 +179,8 @@ app.get("/", (req: Request, res: Response) => {
 					updateLinks(runName);
 					setStatus("Preview ready.");
 				} else {
-					setStatus("Preview failed.");
+						const data = await res.json().catch(() => ({}));
+						setStatus(data.error ? "Preview failed: " + data.error : "Preview failed.");
 				}
 			});
 
@@ -164,7 +209,8 @@ app.get("/", (req: Request, res: Response) => {
 						setStatus(cleanupRes.ok ? "JPGs deleted." : "Failed to delete JPGs.");
 					}
 				} else {
-					setStatus("Full timelapse failed.");
+						const data = await res.json().catch(() => ({}));
+						setStatus(data.error ? "Full timelapse failed: " + data.error : "Full timelapse failed.");
 				}
 			});
 		</script>
@@ -546,11 +592,24 @@ app.post("/setup", async (req: Request, res: Response): Promise<void> => {
 			return;
 		}
 		await installCron(runName);
+
+		const { captureScriptPath } = getRunPaths(runName);
+		let captureWarning: string | null = null;
+		try {
+			// Capture one frame immediately so a brand-new run has content for preview.
+			await runCommand("bash", [captureScriptPath]);
+		} catch (error) {
+			const raw = error instanceof Error ? error.message : String(error);
+			const short = raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
+			captureWarning = `Cron installed, but immediate capture failed: ${short}`;
+		}
+
 		const freeBytes = await getFreeBytes();
-		const warning =
+		const diskWarning =
 			freeBytes !== null && freeBytes < lowSpaceThresholdBytes
 				? `Warning: low disk space (${(freeBytes / 1024 / 1024 / 1024).toFixed(1)} GB free).`
 				: null;
+		const warning = [diskWarning, captureWarning].filter(Boolean).join(" ") || null;
 		res.status(200).json({ ok: true, runName, warning });
 	} catch (error) {
 		console.error(error);
@@ -570,6 +629,10 @@ app.post("/preview", async (req: Request, res: Response): Promise<void> => {
 		res.status(200).json({ ok: true, path: `/timelapse/${runName}/preview.mp4` });
 	} catch (error) {
 		console.error(error);
+		if (error instanceof Error && error.message.includes("No JPG frames found")) {
+			res.status(400).json({ ok: false, error: "No frames found for this run yet. Wait for capture or click Setup again." });
+			return;
+		}
 		res.status(500).json({ ok: false, error: "Failed to build preview" });
 	}
 });
@@ -587,6 +650,10 @@ app.post("/finalize", async (req: Request, res: Response): Promise<void> => {
 		res.status(200).json({ ok: true, path: `/timelapse/${runName}/timelapse.mp4` });
 	} catch (error) {
 		console.error(error);
+		if (error instanceof Error && error.message.includes("No JPG frames found")) {
+			res.status(400).json({ ok: false, error: "No frames found for this run yet. Wait for capture or click Setup again." });
+			return;
+		}
 		res.status(500).json({ ok: false, error: "Failed to build timelapse" });
 	}
 });
