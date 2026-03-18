@@ -6,7 +6,7 @@ Express + FFmpeg MJPEG streaming server for a Raspberry Pi camera, with timelaps
 
 - Raspberry Pi with a camera (USB or CSI, exposed as `/dev/video0`)
 - FFmpeg installed (`sudo apt-get install ffmpeg`)
-- Bun or Node to run the server
+- **Bun** (Pi 4+, ARMv8) or **Node.js** (all architectures)
 
 ## From executable
 You can also run the server without installing Bun or Node by downloading the latest release from the [Releases](https://github.com/carbon16/swarming_control/releases).
@@ -20,13 +20,16 @@ FFMPEG_PATH=ffmpeg CAMERA_DEVICE=/dev/video0 PORT=3000 ./swarming_control
 
 You can check your Pi's architecture with `uname -m`:
 - `aarch64` = ARMv8 (use `swarming_control-arm64`)
-- `armv7l` = ARMv7 (32-bit). Bun compile targets do not currently support armv7.
+- `armv7l` = ARMv7 (32-bit) and `armv6l` = ARMv6 (Pi Zero/Zero W): Bun compile targets do not support these. Run with Bun/Node on-device instead (see below).
 
 
-## With bun
+## With bun (ARMv8 / Pi 4+)
+
 ### Install
 
 ```bash
+curl -fsSL https://bun.sh/install | bash
+cd ~/swarming_control
 bun install
 ```
 
@@ -34,6 +37,33 @@ bun install
 
 ```bash
 FFMPEG_PATH=ffmpeg CAMERA_DEVICE=/dev/video0 PORT=3000 bun run index.ts
+```
+
+## With Node.js (all architectures / ARMv6, ARMv7, ARMv8)
+
+For older Pi models (ARMv6/ARMv7), use Node.js with `tsx` (TypeScript executor):
+
+### Install
+
+```bash
+sudo apt-get update
+sudo apt-get install -y nodejs npm
+cd ~/swarming_control
+npm install
+npx tsx index.ts  # First run (installs tsx)
+```
+
+### Run (subsequent times)
+
+```bash
+FFMPEG_PATH=ffmpeg CAMERA_DEVICE=/dev/video0 PORT=3000 npx tsx index.ts
+```
+
+Or pre-compile to JavaScript:
+
+```bash
+npx tsc
+FFMPEG_PATH=ffmpeg CAMERA_DEVICE=/dev/video0 PORT=3000 node dist/index.js
 ```
 
 ### Build for Raspberry Pi (binary)
@@ -48,7 +78,7 @@ Outputs:
 
 - `dist/swarming_control-arm64`
 
-For ARMv7 (32-bit) Pis, run with Bun/Node on-device instead of using a compiled binary.
+For ARMv7/ARMv6 Pis (older models), compile on your desktop and copy the binary, or run with Bun/Node on-device directly.
 
 ## Optional hotspot setup
 

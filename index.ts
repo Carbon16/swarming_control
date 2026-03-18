@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-const express = require("express");
+import express, { Request, Response } from "express";
+
 const app = express();
 
 const port = Number(process.env.PORT ?? 3000);
@@ -32,7 +33,7 @@ const ffmpegArgs = [
 	"pipe:1",
 ];
 
-app.get("/", (req, res) => {
+app.get("/", (req: Request, res: Response) => {
 	res.type("html").send(`<!doctype html>
 <html>
 	<head>
@@ -161,7 +162,7 @@ app.get("/", (req, res) => {
 
 app.use("/timelapse", express.static(timelapseDir));
 
-app.get("/stream.mjpg", (req, res) => {
+app.get("/stream.mjpg", (req: Request, res: Response) => {
 	res.writeHead(200, {
 		"Content-Type": "multipart/x-mixed-replace; boundary=frame",
 		"Cache-Control": "no-cache, no-store, must-revalidate",
@@ -217,27 +218,37 @@ const runCommand = (command: string, args: string[]) =>
 	});
 
 const setupHotspot = async () => {
-	await runCommand("sudo", [
-		"nmcli",
-		"con",
-		"add",
-		"type",
-		"wifi",
-		"ifname",
-		"wlan0",
-		"con-name",
-		"Hotspot",
-		"autoconnect",
-		"yes",
-		"ssid",
-		"PiGallery",
-		"mode",
-		"ap",
-		"ipv4.method",
-		"shared",
-	]);
-
-	await runCommand("sudo", ["nmcli", "con", "up", "Hotspot"]);
+	try {
+		await Promise.race([
+			Promise.all([
+				runCommand("sudo", [
+					"nmcli",
+					"con",
+					"add",
+					"type",
+					"wifi",
+					"ifname",
+					"wlan0",
+					"con-name",
+					"Hotspot",
+					"autoconnect",
+					"yes",
+					"ssid",
+					"PiGallery",
+					"mode",
+					"ap",
+					"ipv4.method",
+					"shared",
+				]),
+				runCommand("sudo", ["nmcli", "con", "up", "Hotspot"]),
+			]),
+			new Promise<never>((_, reject) =>
+				setTimeout(() => reject(new Error("Hotspot setup timeout (3 min)")), 180000)
+			),
+		]);
+	} catch (error) {
+		console.error("Hotspot setup failed:", error);
+	}
 };
 
 const normalizeRunName = (value: string) =>
@@ -271,7 +282,7 @@ const getFreeBytes = async (): Promise<number | null> => {
 
 		const lines = output.trim().split("\n");
 		if (lines.length < 2) return null;
-		const parts = lines[1].split(/\s+/);
+		const parts = lines[1]?.split(/\s+/) || [];
 		if (parts.length < 4) return null;
 		const availableKb = Number(parts[3]);
 		return Number.isFinite(availableKb) ? availableKb * 1024 : null;
@@ -291,12 +302,23 @@ const installCron = async (runName: string) => {
 	let existing = "";
 	try {
 		const crontabList = spawn("crontab", ["-l"], { stdio: ["ignore", "pipe", "pipe"] });
-		existing = await new Promise<string>((resolve) => {
+		existing = await new Promise<string>((resolve, reject) => {
 			let data = "";
 			crontabList.stdout.on("data", (chunk) => (data += chunk.toString()));
-			crontabList.on("close", () => resolve(data));
+			crontabList.stderr.on("data", (chunk) => {
+				const msg = chunk.toString().toLowerCase();
+				if (!msg.includes("no crontab")) {
+					reject(new Error(`crontab -l failed: ${msg}`));
+				}
+			});
+			crontabList.on("error", reject);
+			crontabList.on("close", (code) => {
+				if (code === 0 || code === 1) resolve(data);
+				else reject(new Error(`crontab -l exited with code ${code}`));
+			});
 		});
-	} catch {
+	} catch (error) {
+		console.error("Warning: could not read existing crontab:", error);
 		existing = "";
 	}
 
@@ -308,12 +330,14 @@ const installCron = async (runName: string) => {
 
 	await new Promise<void>((resolve, reject) => {
 		const crontabSet = spawn("crontab", ["-"], { stdio: ["pipe", "pipe", "pipe"] });
+		let stderr = "";
+		crontabSet.stderr.on("data", (chunk) => (stderr += chunk.toString()));
 		crontabSet.stdin.write(newCrontab);
 		crontabSet.stdin.end();
 		crontabSet.on("error", reject);
 		crontabSet.on("close", (code) => {
 			if (code === 0) resolve();
-			else reject(new Error(`crontab exited with code ${code}`));
+			else reject(new Error(`crontab installation failed: ${stderr || `code ${code}`}`));
 		});
 	});
 };
@@ -322,12 +346,23 @@ const removeCron = async (runName: string) => {
 	let existing = "";
 	try {
 		const crontabList = spawn("crontab", ["-l"], { stdio: ["ignore", "pipe", "pipe"] });
-		existing = await new Promise<string>((resolve) => {
+		existing = await new Promise<string>((resolve, reject) => {
 			let data = "";
 			crontabList.stdout.on("data", (chunk) => (data += chunk.toString()));
-			crontabList.on("close", () => resolve(data));
+			crontabList.stderr.on("data", (chunk) => {
+				const msg = chunk.toString().toLowerCase();
+				if (!msg.includes("no crontab")) {
+					reject(new Error(`crontab -l failed: ${msg}`));
+				}
+			});
+			crontabList.on("error", reject);
+			crontabList.on("close", (code) => {
+				if (code === 0 || code === 1) resolve(data);
+				else reject(new Error(`crontab -l exited with code ${code}`));
+			});
 		});
-	} catch {
+	} catch (error) {
+		console.error("Warning: could not read existing crontab:", error);
 		existing = "";
 	}
 
@@ -338,12 +373,14 @@ const removeCron = async (runName: string) => {
 
 	await new Promise<void>((resolve, reject) => {
 		const crontabSet = spawn("crontab", ["-"], { stdio: ["pipe", "pipe", "pipe"] });
+		let stderr = "";
+		crontabSet.stderr.on("data", (chunk) => (stderr += chunk.toString()));
 		crontabSet.stdin.write(newCrontab);
 		crontabSet.stdin.end();
 		crontabSet.on("error", reject);
 		crontabSet.on("close", (code) => {
 			if (code === 0) resolve();
-			else reject(new Error(`crontab exited with code ${code}`));
+			else reject(new Error(`crontab removal failed: ${stderr || `code ${code}`}`));
 		});
 	});
 };
@@ -384,7 +421,7 @@ const buildTimelapse = async (runDir: string, outputPath: string, width: number)
 	await runCommand(ffmpegPath, args);
 };
 
-app.get("/status", async (_req, res) => {
+app.get("/status", async (_req: Request, res: Response): Promise<void> => {
 	const freeBytes = await getFreeBytes();
 	const warning =
 		freeBytes !== null && freeBytes < lowSpaceThresholdBytes
@@ -393,7 +430,27 @@ app.get("/status", async (_req, res) => {
 	res.status(200).json({ ok: true, freeBytes, warning });
 });
 
-app.post("/setup", async (req, res) => {
+app.get("/health", async (_req: Request, res: Response): Promise<void> => {
+	try {
+		const ffmpeg = spawn(ffmpegPath, ["-version"], {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		await new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(() => reject(new Error("FFmpeg check timeout")), 5000);
+			ffmpeg.on("close", (code) => {
+				clearTimeout(timeout);
+				if (code === 0) resolve();
+				else reject(new Error(`FFmpeg returned code ${code}`));
+			});
+			ffmpeg.on("error", reject);
+		});
+		res.status(200).json({ ok: true, status: "healthy" });
+	} catch (error) {
+		res.status(503).json({ ok: false, status: "unhealthy", error: String(error) });
+	}
+});
+
+app.post("/setup", async (req: Request, res: Response): Promise<void> => {
 	try {
 		const runName = normalizeRunName(req.body?.runName ?? "");
 		if (!runName) {
@@ -413,7 +470,7 @@ app.post("/setup", async (req, res) => {
 	}
 });
 
-app.post("/preview", async (req, res) => {
+app.post("/preview", async (req: Request, res: Response): Promise<void> => {
 	try {
 		const runName = normalizeRunName(req.body?.runName ?? "");
 		if (!runName) {
@@ -429,7 +486,7 @@ app.post("/preview", async (req, res) => {
 	}
 });
 
-app.post("/finalize", async (req, res) => {
+app.post("/finalize", async (req: Request, res: Response): Promise<void> => {
 	try {
 		const runName = normalizeRunName(req.body?.runName ?? "");
 		if (!runName) {
@@ -446,7 +503,7 @@ app.post("/finalize", async (req, res) => {
 	}
 });
 
-app.post("/cleanup", async (req, res) => {
+app.post("/cleanup", async (req: Request, res: Response): Promise<void> => {
 	try {
 		const runName = normalizeRunName(req.body?.runName ?? "");
 		if (!runName) {
@@ -464,15 +521,29 @@ app.post("/cleanup", async (req, res) => {
 
 const startServer = async () => {
 	if (shouldEnableHotspot) {
-		console.log("Enabling hotspot..." );
-		await setupHotspot();
-		console.log("Hotspot enabled (SSID: PiGallery).");
+		console.log("Enabling hotspot...");
+		setupHotspot();
 	}
 
-	app.listen(port, () => {
+	const server = app.listen(port, () => {
 		console.log(`Streaming server listening on http://localhost:${port}`);
 		console.log(`Camera device: ${cameraDevice}`);
 	});
+
+	const gracefulShutdown = (signal: string) => {
+		console.log(`Received ${signal}, shutting down gracefully...`);
+		server.close(() => {
+			console.log("Server closed");
+			process.exit(0);
+		});
+		setTimeout(() => {
+			console.error("Forced shutdown after 10s");
+			process.exit(1);
+		}, 10000);
+	};
+
+	process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+	process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 };
 
 startServer().catch((error) => {

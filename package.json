@@ -5,10 +5,13 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build:pi:arm64": "bun build index.ts --compile --target=bun-linux-arm64 --outfile dist/swarming_control-arm64"
+    "build:pi:arm64": "bun build index.ts --compile --target=bun-linux-arm64 --outfile dist/swarming_control-arm64",
+    "build": "tsc",
+    "start": "node dist/index.js"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/express": "^4.17.21"
   },
   "peerDependencies": {
     "typescript": "^5"
